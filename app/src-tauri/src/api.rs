@@ -54,10 +54,7 @@ impl Api {
         let addr = resolve(&server.address, server.rest_port).await?;
         let ca = reqwest::Certificate::from_pem(CA_PEM.as_bytes()).map_err(|e| e.to_string())?;
         let builder = reqwest::Client::builder();
-        #[cfg(not(windows))]
         let builder = builder.use_rustls_tls();
-        #[cfg(windows)]
-        let builder = builder.use_native_tls();
         let client = builder
             .tls_built_in_root_certs(false)
             .add_root_certificate(ca)
