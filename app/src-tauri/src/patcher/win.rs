@@ -7,7 +7,11 @@ use windows::Win32::System::Diagnostics::Debug::{ReadProcessMemory, WriteProcess
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 };
-use windows::Win32::System::Memory::{VirtualQueryEx, MEMORY_BASIC_INFORMATION, MEM_COMMIT, MEM_PRIVATE, PAGE_READWRITE};
+use windows::Win32::System::Memory::{
+    VirtualQueryEx, MEMORY_BASIC_INFORMATION, MEM_COMMIT, MEM_PRIVATE, PAGE_EXECUTE_READ,
+    PAGE_EXECUTE_READWRITE, PAGE_EXECUTE_WRITECOPY, PAGE_GUARD, PAGE_NOACCESS, PAGE_READONLY,
+    PAGE_READWRITE, PAGE_WRITECOPY,
+};
 use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
 use windows::Win32::System::Threading::{
     GetExitCodeProcess, OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_OPERATION, PROCESS_VM_READ, PROCESS_VM_WRITE,
@@ -59,7 +63,21 @@ impl Memory for ProcessMemory {
                 break;
             }
             let base = info.BaseAddress as usize;
-            if info.State == MEM_COMMIT && info.Type == MEM_PRIVATE && info.Protect == PAGE_READWRITE {
+            let protect = info.Protect.0;
+            let readable = protect & PAGE_GUARD.0 == 0
+                && protect & PAGE_NOACCESS.0 == 0
+                && [
+                    PAGE_READONLY,
+                    PAGE_READWRITE,
+                    PAGE_WRITECOPY,
+                    PAGE_EXECUTE_READ,
+                    PAGE_EXECUTE_READWRITE,
+                    PAGE_EXECUTE_WRITECOPY,
+                ]
+                .iter()
+                .any(|p| protect & 0xFF == p.0);
+
+            if info.State == MEM_COMMIT && info.Type == MEM_PRIVATE && readable {
                 out.push((base as u64, (base + info.RegionSize) as u64));
             }
             let next = base.saturating_add(info.RegionSize);
