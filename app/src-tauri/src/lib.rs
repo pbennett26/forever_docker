@@ -289,12 +289,9 @@ fn current_rss(m: &dyn patcher::Memory) -> u64 {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn wait_for_client(child_pid: u32) -> Option<patcher::ProcessMemory> {
-    #[cfg(windows)]
-    if let Some(m) = patcher::ProcessMemory::open(child_pid) {
-        return Some(m);
-    }
-    let _ = child_pid;
+fn wait_for_client(_child_pid: u32) -> Option<patcher::ProcessMemory> {
+    // Always select the actual WowB.exe process. Do not assume the process
+    // returned by Command::spawn is the process whose memory contains the key store.
     for _ in 0..180 {
         if let Some(m) = patcher::find_client() {
             return Some(m);
