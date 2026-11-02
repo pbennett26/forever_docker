@@ -80,11 +80,17 @@ impl Patcher {
         if !(2..=12).contains(&region_group) || region_group == 9 {
             return Err(t("bad_region_group").into());
         }
-        Ok(Self { keys: KNOWN_KEYS.iter().map(|k| hex32(k).unwrap()).collect(), new_key, group: region_group as usize })
+        Ok(Self {
+            keys: KNOWN_KEYS.iter().map(|k| hex32(k).unwrap()).collect(),
+            new_key,
+            group: region_group as usize,
+        })
     }
 
     fn state(&self, mem: &dyn Memory, array: u64) -> State {
-        let Some(raw) = mem.read(array, BLOCK) else { return State::Invalid };
+        let Some(raw) = mem.read(array, BLOCK) else {
+            return State::Invalid;
+        };
         if raw.len() != BLOCK {
             return State::Invalid;
         }
@@ -94,40 +100,68 @@ impl Patcher {
                 return State::Invalid;
             }
             let key = &raw[o + 4..o + 36];
-            let ok = if e == self.group - 1 { key == self.keys[e] || key == self.new_key } else { key == self.keys[e] };
+            let ok = if e == self.group - 1 {
+                key == self.keys[e] || key == self.new_key
+            } else {
+                key == self.keys[e]
+            };
             // raw[o + 37] is uninitialised padding: not checked
             if !ok || raw[o + 36] != EXPECTED_FLAGS[e] || raw[o + 38..o + 40] != [0, 0] {
                 return State::Invalid;
             }
         }
         let t = (self.group - 1) * ENTRY + 4;
-        if raw[t..t + 32] == self.new_key { State::Patched } else { State::Original }
+        if raw[t..t + 32] == self.new_key {
+            State::Patched
+        } else {
+            State::Original
+        }
     }
 
     fn find_stores(&self, mem: &dyn Memory) -> Vec<(u64, State)> {
-        let needle = &self.keys[0];
-        let finder = memmem::Finder::new(needle);
         let mut found = Vec::new();
+
         for (lo, hi) in mem.regions() {
             let mut off = lo;
+
             while off < hi {
                 let take = CHUNK.min((hi - off) as usize);
-                let Some(buf) = mem.read(off, take) else { break };
-                for i in finder.find_iter(&buf) {
-                    let hit = off + i as u64;
-                    if hit % 4 == 0 && hit >= 4 {
-                        let st = self.state(mem, hit - 4);
+                let Some(buf) = mem.read(off, take) else {
+                    break;
+                };
+
+                for (key_index, key) in self.keys.iter().enumerate() {
+                    let finder = memmem::Finder::new(key);
+
+                    for i in finder.find_iter(&buf) {
+                        let hit = off + i as u64;
+                        let entry_offset = (key_index * ENTRY + 4) as u64;
+
+                        if hit < entry_offset {
+                            continue;
+                        }
+
+                        let array = hit - entry_offset;
+
+                        if array % 4 != 0 {
+                            continue;
+                        }
+
+                        let st = self.state(mem, array);
                         if st != State::Invalid {
-                            found.push((hit - 4, st));
+                            found.push((array, st));
                         }
                     }
                 }
+
                 if take < CHUNK {
                     break;
                 }
-                off += (CHUNK - needle.len()) as u64;
+
+                off += (CHUNK - 31) as u64;
             }
         }
+
         found.sort_by_key(|f| f.0);
         found.dedup_by_key(|f| f.0);
         found
@@ -141,7 +175,11 @@ impl Patcher {
                     if !mem.write(addr, &self.new_key) {
                         return Err(t("write_refused").into());
                     }
-                    return if self.state(mem, array) == State::Patched { Ok(()) } else { Err(t("verify_failed").into()) };
+                    return if self.state(mem, array) == State::Patched {
+                        Ok(())
+                    } else {
+                        Err(t("verify_failed").into())
+                    };
                 }
                 Some(cur) if cur == self.new_key => return Ok(()),
                 _ => std::thread::sleep(Duration::from_millis(300)),
@@ -152,8 +190,12 @@ impl Patcher {
 
     /// Watches the client until it closes. `switch` may return a better process (Linux: the Wine launcher process
     /// is found before the real game process).
-    pub fn watch(&self, mut mem: Box<dyn Memory>, mut switch: impl FnMut(&dyn Memory) -> Option<Box<dyn Memory>>,
-                 mut emit: impl FnMut(Event)) {
+    pub fn watch(
+        &self,
+        mut mem: Box<dyn Memory>,
+        mut switch: impl FnMut(&dyn Memory) -> Option<Box<dyn Memory>>,
+        mut emit: impl FnMut(Event),
+    ) {
         let mut store: Option<u64> = None;
         let mut last_switch = Instant::now();
         let mut said_waiting = false;
@@ -196,7 +238,11 @@ impl Patcher {
             let stores = self.find_stores(mem.as_ref());
             match stores.as_slice() {
                 [(array, st)] => {
-                    let res = if *st == State::Patched { Ok(()) } else { self.patch(mem.as_ref(), *array) };
+                    let res = if *st == State::Patched {
+                        Ok(())
+                    } else {
+                        self.patch(mem.as_ref(), *array)
+                    };
                     match res {
                         Ok(()) => {
                             emit(Event::Log(tf("key_written", &[&self.group])));
