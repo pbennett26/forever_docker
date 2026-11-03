@@ -17,7 +17,9 @@ pub fn write_wtf(settings: &Settings) -> Result<(), String> {
     std::fs::create_dir_all(&dir).map_err(|e| tf("wtf_folder", &[&e]))?;
     let path = dir.join(WTF_NAME);
     let base = dir.join("Config.wtf");
-    let text = std::fs::read_to_string(&path).or_else(|_| std::fs::read_to_string(&base)).unwrap_or_default();
+    let text = std::fs::read_to_string(&path)
+        .or_else(|_| std::fs::read_to_string(&base))
+        .unwrap_or_default();
     let wanted = [
         ("portal", settings.server.portal.clone()),
         ("textLocale", settings.locale.clone()),
@@ -25,26 +27,46 @@ pub fn write_wtf(settings: &Settings) -> Result<(), String> {
     ];
     let mut lines: Vec<String> = text
         .lines()
-        .filter(|l| !wanted.iter().any(|(k, _)| l.starts_with(&format!("SET {k} "))))
+        .filter(|l| {
+            !wanted
+                .iter()
+                .any(|(k, _)| l.starts_with(&format!("SET {k} ")))
+        })
         .map(str::to_string)
         .collect();
     for (k, v) in wanted {
         lines.push(format!("SET {k} \"{v}\""));
     }
-    std::fs::write(&path, lines.join("\r\n") + "\r\n").map_err(|e| format!("{} : {e}", path.display()))
+    std::fs::write(&path, lines.join("\r\n") + "\r\n")
+        .map_err(|e| format!("{} : {e}", path.display()))
 }
 
 /// Stores the login ticket where the client reads it with -launcherlogin.
 #[cfg(windows)]
-pub fn write_launch_options(_settings: &Settings, portal: &str, ticket: &str, game_account: &str) -> Result<(), String> {
+pub fn write_launch_options(
+    _settings: &Settings,
+    portal: &str,
+    ticket: &str,
+    game_account: &str,
+) -> Result<(), String> {
     use windows::core::HSTRING;
     use windows::Win32::System::Registry::*;
     let blob = crate::dpapi::protect(ticket.as_bytes())?;
     unsafe {
         let mut key = HKEY::default();
-        RegCreateKeyExW(HKEY_CURRENT_USER, &HSTRING::from(LAUNCH_OPTIONS), 0, None, REG_OPTION_NON_VOLATILE, KEY_WRITE, None, &mut key, None)
-            .ok()
-            .map_err(|e| tf("registry", &[&e]))?;
+        RegCreateKeyExW(
+            HKEY_CURRENT_USER,
+            &HSTRING::from(LAUNCH_OPTIONS),
+            0,
+            None,
+            REG_OPTION_NON_VOLATILE,
+            KEY_WRITE,
+            None,
+            &mut key,
+            None,
+        )
+        .ok()
+        .map_err(|e| tf("registry", &[&e]))?;
         let set_str = |name: &str, value: &str| {
             let wide: Vec<u16> = value.encode_utf16().chain(std::iter::once(0)).collect();
             let bytes = std::slice::from_raw_parts(wide.as_ptr() as *const u8, wide.len() * 2);
@@ -52,7 +74,9 @@ pub fn write_launch_options(_settings: &Settings, portal: &str, ticket: &str, ga
         };
         let r = set_str("CONNECTION_STRING", portal)
             .and_then(|_| set_str("GAME_ACCOUNT", game_account))
-            .and_then(|_| RegSetValueExW(key, &HSTRING::from("WEB_TOKEN"), 0, REG_BINARY, Some(&blob)).ok());
+            .and_then(|_| {
+                RegSetValueExW(key, &HSTRING::from("WEB_TOKEN"), 0, REG_BINARY, Some(&blob)).ok()
+            });
         let _ = RegCloseKey(key);
         r.map_err(|e| tf("registry", &[&e]))
     }
@@ -60,7 +84,12 @@ pub fn write_launch_options(_settings: &Settings, portal: &str, ticket: &str, ga
 
 /// Linux: the same values in the prefix registry, through `reg import` (the Wine DPAPI blob is built here).
 #[cfg(target_os = "linux")]
-pub fn write_launch_options(settings: &Settings, portal: &str, ticket: &str, game_account: &str) -> Result<(), String> {
+pub fn write_launch_options(
+    settings: &Settings,
+    portal: &str,
+    ticket: &str,
+    game_account: &str,
+) -> Result<(), String> {
     use crate::dpapi::{wine, WEB_TOKEN_ENTROPY};
     let blob = wine::protect(ticket.as_bytes(), wine::PROTON_USER, &WEB_TOKEN_ENTROPY);
     let hexdata: Vec<String> = blob.iter().map(|b| format!("{b:02x}")).collect();
@@ -86,7 +115,7 @@ pub fn write_launch_options(settings: &Settings, portal: &str, ticket: &str, gam
 #[cfg(windows)]
 pub fn spawn(settings: &Settings) -> Result<Child, String> {
     Command::new(settings.exe())
-        .args(["-launcherlogin", "-config", WTF_NAME])
+        .args(["-launcherlogin", "-uid", "wow_classic_beta", "-config", WTF_NAME])
         .current_dir(&settings.game_dir)
         .spawn()
         .map_err(|e| tf("launch_failed", &[&"WowB.exe", &e]))
@@ -101,7 +130,10 @@ pub fn spawn(settings: &Settings) -> Result<Child, String> {
     let l = &settings.linux;
     if l.gamescope && crate::system::which("gamescope") {
         // gamescope starts its own Xwayland with a US keyboard unless told otherwise
-        let (layout, variant) = l.keyboard.split_once('+').unwrap_or((l.keyboard.as_str(), ""));
+        let (layout, variant) = l
+            .keyboard
+            .split_once('+')
+            .unwrap_or((l.keyboard.as_str(), ""));
         if !layout.is_empty() {
             env.push(("XKB_DEFAULT_LAYOUT".into(), layout.into()));
         }
