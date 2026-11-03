@@ -46,6 +46,7 @@ impl ProcessMemory {
     /// scanner's selected ranges and a diagnostic breakdown.
     fn enumerate_regions(&self) -> (Vec<(u64, u64)>, String) {
         let mut out = Vec::new();
+        let mut private_rw = Vec::new();
         let mut counts: BTreeMap<(u32, u32, u32, u32, bool), (usize, u64)> = BTreeMap::new();
 
         let mut addr: usize = 0;
@@ -89,6 +90,14 @@ impl ProcessMemory {
                 out.push((base as u64, base.saturating_add(info.RegionSize) as u64));
             }
 
+            if info.State == MEM_COMMIT
+                && info.Type == MEM_PRIVATE
+                && protect & 0xFF == PAGE_READWRITE.0
+                && flags == 0
+            {
+                private_rw.push(format!("{:#x}+{} bytes", base, info.RegionSize));
+            }
+
             let key = (info.State.0, info.Type.0, protect & 0xFF, flags, selected);
 
             let entry = counts.entry(key).or_insert((0, 0));
@@ -118,6 +127,12 @@ impl ProcessMemory {
             })
             .collect::<Vec<_>>()
             .join("; ");
+
+        let diagnostic = format!(
+            "{}; private_rw=[{}]",
+            diagnostic,
+            private_rw.join(", ")
+        );
 
         (out, diagnostic)
     }
