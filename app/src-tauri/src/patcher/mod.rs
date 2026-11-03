@@ -118,6 +118,69 @@ impl Patcher {
         }
     }
 
+    fn diagnostic_summary(&self, mem: &dyn Memory) -> String {
+        let regions = mem.regions();
+        let total_bytes: u64 = regions.iter().map(|(lo, hi)| hi.saturating_sub(*lo)).sum();
+        let mut hits = [0usize; COUNT];
+        let mut aligned = [0usize; COUNT];
+        let mut valid = [0usize; COUNT];
+        let mut bytes_read = 0u64;
+
+        for (lo, hi) in &regions {
+            let mut off = *lo;
+            while off < *hi {
+                let take = CHUNK.min((*hi - off) as usize);
+                let Some(buf) = mem.read(off, take) else {
+                    break;
+                };
+                if buf.is_empty() {
+                    break;
+                }
+                bytes_read += buf.len() as u64;
+
+                for (key_index, key) in self.keys.iter().enumerate() {
+                    let finder = memmem::Finder::new(key);
+                    for i in finder.find_iter(&buf) {
+                        hits[key_index] += 1;
+                        let entry_offset = (key_index * ENTRY + 4) as u64;
+                        let hit = off + i as u64;
+                        if hit >= entry_offset {
+                            let array = hit - entry_offset;
+                            if array % 4 == 0 {
+                                aligned[key_index] += 1;
+                                if self.state(mem, array) != State::Invalid {
+                                    valid[key_index] += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if buf.len() < take {
+                    break;
+                }
+                if take < CHUNK {
+                    break;
+                }
+                off += (buf.len() - 31) as u64;
+            }
+        }
+
+        let counts: Vec<String> = (0..COUNT)
+            .map(|i| format!("{}:hits={},aligned={},valid={}", i + 1, hits[i], aligned[i], valid[i]))
+            .collect();
+
+        format!(
+            "Scanner diagnostic: pid={}, regions={}, region_bytes={} MiB, read={} MiB, group={}, keys=[{}]",
+            mem.pid(),
+            regions.len(),
+            total_bytes / 1024 / 1024,
+            bytes_read / 1024 / 1024,
+            self.group,
+            counts.join("; ")
+        )
+    }
+
     fn find_stores(&self, mem: &dyn Memory) -> Vec<(u64, State)> {
         let mut found = Vec::new();
 
@@ -264,6 +327,7 @@ impl Patcher {
                 }
                 [] => {
                     if !said_waiting {
+                        emit(Event::Log(self.diagnostic_summary(mem.as_ref())));
                         emit(Event::Log(t("waiting_realm").into()));
                         said_waiting = true;
                     }
