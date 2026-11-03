@@ -48,6 +48,11 @@ pub trait Memory {
     fn write(&self, addr: u64, data: &[u8]) -> bool;
     fn alive(&self) -> bool;
     fn pid(&self) -> u32;
+
+    /// Platform-specific memory-region breakdown for diagnostics.
+    fn region_diagnostic(&self) -> String {
+        "region breakdown unavailable".to_string()
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -157,7 +162,13 @@ impl Patcher {
                 }
 
                 if buf.len() < take {
-                    break;
+                    // Continue after a partial read while preserving overlap.
+                    let advance = buf.len().saturating_sub(31);
+                    if advance == 0 {
+                        break;
+                    }
+                    off += advance as u64;
+                    continue;
                 }
                 if take < CHUNK {
                     break;
@@ -171,13 +182,14 @@ impl Patcher {
             .collect();
 
         format!(
-            "Scanner diagnostic: pid={}, regions={}, region_bytes={} MiB, read={} MiB, group={}, keys=[{}]",
+            "Scanner diagnostic: pid={}, regions={}, region_bytes={} MiB, read={} MiB, group={}, keys=[{}], memory_map=[{}]",
             mem.pid(),
             regions.len(),
             total_bytes / 1024 / 1024,
             bytes_read / 1024 / 1024,
             self.group,
-            counts.join("; ")
+            counts.join("; "),
+            mem.region_diagnostic()
         )
     }
 

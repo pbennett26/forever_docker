@@ -2,6 +2,7 @@
 
 use super::Memory;
 use std::ffi::c_void;
+use std::collections::BTreeMap;
 use windows::Win32::Foundation::{CloseHandle, HANDLE, STILL_ACTIVE};
 use windows::Win32::System::Diagnostics::Debug::{ReadProcessMemory, WriteProcessMemory};
 use windows::Win32::System::Diagnostics::ToolHelp::{
@@ -42,6 +43,88 @@ impl ProcessMemory {
         Some(Self { pid, handle })
     }
 
+    /// Summarize all VirtualQueryEx regions, including regions excluded by
+    /// the current scanner filter. Does not read or write target memory.
+    pub fn region_diagnostic(&self) -> String {
+        let mut counts: BTreeMap<(u32, u32, u32, u32, bool), (usize, u64)> =
+            BTreeMap::new();
+
+        let mut addr: usize = 0;
+
+        loop {
+            let mut info = MEMORY_BASIC_INFORMATION::default();
+            let n = unsafe {
+                VirtualQueryEx(
+                    self.handle,
+                    Some(addr as *const c_void),
+                    &mut info,
+                    std::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
+                )
+            };
+
+            if n == 0 {
+                break;
+            }
+
+            let base = info.BaseAddress as usize;
+            let protect = info.Protect.0;
+            let flags = protect & (PAGE_GUARD.0 | PAGE_NOACCESS.0);
+
+            let readable = flags == 0
+                && [
+                    PAGE_READONLY,
+                    PAGE_READWRITE,
+                    PAGE_WRITECOPY,
+                    PAGE_EXECUTE_READ,
+                    PAGE_EXECUTE_READWRITE,
+                    PAGE_EXECUTE_WRITECOPY,
+                ]
+                .iter()
+                .any(|p| protect & 0xFF == p.0);
+
+            let selected = info.State == MEM_COMMIT
+                && (info.Type == MEM_PRIVATE
+                    || info.Type == MEM_MAPPED
+                    || info.Type == MEM_IMAGE)
+                && readable;
+
+            let key = (
+                info.State.0,
+                info.Type.0,
+                protect & 0xFF,
+                flags,
+                selected,
+            );
+
+            let entry = counts.entry(key).or_insert((0, 0));
+            entry.0 += 1;
+            entry.1 += info.RegionSize as u64;
+
+            let next = base.saturating_add(info.RegionSize);
+            if next <= addr {
+                break;
+            }
+            addr = next;
+        }
+
+        counts
+            .iter()
+            .map(|((state, kind, protect, flags, selected), (regions, bytes))| {
+                format!(
+                    "state={:#x},type={:#x},protect={:#x},flags={:#x},selected={}:{} regions/{} MiB",
+                    state,
+                    kind,
+                    protect,
+                    flags,
+                    selected,
+                    regions,
+                    bytes / 1024 / 1024
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
+
     pub fn rss(&self) -> u64 {
         let mut c = PROCESS_MEMORY_COUNTERS::default();
         unsafe {
@@ -60,6 +143,10 @@ impl ProcessMemory {
 }
 
 impl Memory for ProcessMemory {
+    fn region_diagnostic(&self) -> String {
+        ProcessMemory::region_diagnostic(self)
+    }
+
     fn regions(&self) -> Vec<(u64, u64)> {
         let mut out = Vec::new();
         let mut addr: usize = 0;
