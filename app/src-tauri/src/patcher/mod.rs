@@ -154,11 +154,21 @@ impl Patcher {
                     }
                 }
 
-                if take < CHUNK {
+                let advance = if buf.len() < take {
+                    // A partial ReadProcessMemory result: continue from the
+                    // last 31 bytes so keys crossing the boundary are retained.
+                    buf.len().saturating_sub(31)
+                } else if take < CHUNK {
+                    break;
+                } else {
+                    CHUNK - 31
+                };
+
+                if advance == 0 {
                     break;
                 }
 
-                off += (CHUNK - 31) as u64;
+                off += advance as u64;
             }
         }
 

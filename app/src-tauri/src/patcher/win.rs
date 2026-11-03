@@ -7,10 +7,16 @@ use windows::Win32::System::Diagnostics::Debug::{ReadProcessMemory, WriteProcess
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 };
-use windows::Win32::System::Memory::{VirtualQueryEx, MEMORY_BASIC_INFORMATION, MEM_COMMIT, MEM_PRIVATE, PAGE_READWRITE};
+use windows::Win32::System::Memory::{
+    VirtualQueryEx, MEMORY_BASIC_INFORMATION, MEM_COMMIT, MEM_PRIVATE, MEM_MAPPED,
+    MEM_IMAGE, PAGE_EXECUTE_READ,
+    PAGE_EXECUTE_READWRITE, PAGE_EXECUTE_WRITECOPY, PAGE_GUARD, PAGE_NOACCESS, PAGE_READONLY,
+    PAGE_READWRITE, PAGE_WRITECOPY,
+};
 use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
 use windows::Win32::System::Threading::{
-    GetExitCodeProcess, OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_OPERATION, PROCESS_VM_READ, PROCESS_VM_WRITE,
+    GetExitCodeProcess, OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_OPERATION,
+    PROCESS_VM_READ, PROCESS_VM_WRITE,
 };
 
 pub struct ProcessMemory {
@@ -30,7 +36,8 @@ impl Drop for ProcessMemory {
 
 impl ProcessMemory {
     pub fn open(pid: u32) -> Option<Self> {
-        let access = PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_QUERY_INFORMATION;
+        let access =
+            PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_QUERY_INFORMATION;
         let handle = unsafe { OpenProcess(access, false, pid) }.ok()?;
         Some(Self { pid, handle })
     }
@@ -38,7 +45,13 @@ impl ProcessMemory {
     pub fn rss(&self) -> u64 {
         let mut c = PROCESS_MEMORY_COUNTERS::default();
         unsafe {
-            if GetProcessMemoryInfo(self.handle, &mut c, std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32).is_ok() {
+            if GetProcessMemoryInfo(
+                self.handle,
+                &mut c,
+                std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
+            )
+            .is_ok()
+            {
                 return c.WorkingSetSize as u64 / 4096;
             }
         }
@@ -53,13 +66,35 @@ impl Memory for ProcessMemory {
         loop {
             let mut info = MEMORY_BASIC_INFORMATION::default();
             let n = unsafe {
-                VirtualQueryEx(self.handle, Some(addr as *const c_void), &mut info, std::mem::size_of::<MEMORY_BASIC_INFORMATION>())
+                VirtualQueryEx(
+                    self.handle,
+                    Some(addr as *const c_void),
+                    &mut info,
+                    std::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
+                )
             };
             if n == 0 {
                 break;
             }
             let base = info.BaseAddress as usize;
-            if info.State == MEM_COMMIT && info.Type == MEM_PRIVATE && info.Protect == PAGE_READWRITE {
+            let protect = info.Protect.0;
+            let readable = protect & PAGE_GUARD.0 == 0
+                && protect & PAGE_NOACCESS.0 == 0
+                && [
+                    PAGE_READONLY,
+                    PAGE_READWRITE,
+                    PAGE_WRITECOPY,
+                    PAGE_EXECUTE_READ,
+                    PAGE_EXECUTE_READWRITE,
+                    PAGE_EXECUTE_WRITECOPY,
+                ]
+                .iter()
+                .any(|p| protect & 0xFF == p.0);
+
+            if info.State == MEM_COMMIT
+                && (info.Type == MEM_PRIVATE || info.Type == MEM_MAPPED || info.Type == MEM_IMAGE)
+                && readable
+            {
                 out.push((base as u64, (base + info.RegionSize) as u64));
             }
             let next = base.saturating_add(info.RegionSize);
@@ -75,7 +110,13 @@ impl Memory for ProcessMemory {
         let mut buf = vec![0u8; len];
         let mut got = 0usize;
         unsafe {
-            let _ = ReadProcessMemory(self.handle, addr as *const c_void, buf.as_mut_ptr() as *mut c_void, len, Some(&mut got));
+            let _ = ReadProcessMemory(
+                self.handle,
+                addr as *const c_void,
+                buf.as_mut_ptr() as *mut c_void,
+                len,
+                Some(&mut got),
+            );
         }
         if got == 0 {
             return None;
@@ -87,14 +128,23 @@ impl Memory for ProcessMemory {
     fn write(&self, addr: u64, data: &[u8]) -> bool {
         let mut written = 0usize;
         unsafe {
-            WriteProcessMemory(self.handle, addr as *const c_void, data.as_ptr() as *const c_void, data.len(), Some(&mut written)).is_ok()
+            WriteProcessMemory(
+                self.handle,
+                addr as *const c_void,
+                data.as_ptr() as *const c_void,
+                data.len(),
+                Some(&mut written),
+            )
+            .is_ok()
                 && written == data.len()
         }
     }
 
     fn alive(&self) -> bool {
         let mut code = 0u32;
-        unsafe { GetExitCodeProcess(self.handle, &mut code).is_ok() && code == STILL_ACTIVE.0 as u32 }
+        unsafe {
+            GetExitCodeProcess(self.handle, &mut code).is_ok() && code == STILL_ACTIVE.0 as u32
+        }
     }
 
     fn pid(&self) -> u32 {
@@ -107,10 +157,17 @@ pub fn find_client() -> Option<ProcessMemory> {
     let mut best: Option<(u64, ProcessMemory)> = None;
     unsafe {
         let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0).ok()?;
-        let mut entry = PROCESSENTRY32W { dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32, ..Default::default() };
+        let mut entry = PROCESSENTRY32W {
+            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+            ..Default::default()
+        };
         let mut ok = Process32FirstW(snap, &mut entry).is_ok();
         while ok {
-            let len = entry.szExeFile.iter().position(|c| *c == 0).unwrap_or(entry.szExeFile.len());
+            let len = entry
+                .szExeFile
+                .iter()
+                .position(|c| *c == 0)
+                .unwrap_or(entry.szExeFile.len());
             let name = String::from_utf16_lossy(&entry.szExeFile[..len]);
             if name.eq_ignore_ascii_case("WowB.exe") {
                 if let Some(p) = ProcessMemory::open(entry.th32ProcessID) {
