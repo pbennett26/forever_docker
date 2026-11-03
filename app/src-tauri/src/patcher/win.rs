@@ -1,18 +1,17 @@
 //! Windows: ReadProcessMemory / WriteProcessMemory on the WowB.exe process started by the launcher.
 
 use super::Memory;
-use std::ffi::c_void;
 use std::collections::BTreeMap;
+use std::ffi::c_void;
 use windows::Win32::Foundation::{CloseHandle, HANDLE, STILL_ACTIVE};
 use windows::Win32::System::Diagnostics::Debug::{ReadProcessMemory, WriteProcessMemory};
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 };
 use windows::Win32::System::Memory::{
-    VirtualQueryEx, MEMORY_BASIC_INFORMATION, MEM_COMMIT, MEM_PRIVATE, MEM_MAPPED,
-    MEM_IMAGE, PAGE_EXECUTE_READ,
-    PAGE_EXECUTE_READWRITE, PAGE_EXECUTE_WRITECOPY, PAGE_GUARD, PAGE_NOACCESS, PAGE_READONLY,
-    PAGE_READWRITE, PAGE_WRITECOPY,
+    VirtualQueryEx, MEMORY_BASIC_INFORMATION, MEM_COMMIT, MEM_IMAGE, MEM_MAPPED, MEM_PRIVATE,
+    PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE, PAGE_EXECUTE_WRITECOPY, PAGE_GUARD, PAGE_NOACCESS,
+    PAGE_READONLY, PAGE_READWRITE, PAGE_WRITECOPY,
 };
 use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
 use windows::Win32::System::Threading::{
@@ -43,11 +42,11 @@ impl ProcessMemory {
         Some(Self { pid, handle })
     }
 
-    /// Summarize all VirtualQueryEx regions, including regions excluded by
-    /// the current scanner filter. Does not read or write target memory.
-    pub fn region_diagnostic(&self) -> String {
-        let mut counts: BTreeMap<(u32, u32, u32, u32, bool), (usize, u64)> =
-            BTreeMap::new();
+    /// Enumerate all VirtualQueryEx regions once, returning both the
+    /// scanner's selected ranges and a diagnostic breakdown.
+    fn enumerate_regions(&self) -> (Vec<(u64, u64)>, String) {
+        let mut out = Vec::new();
+        let mut counts: BTreeMap<(u32, u32, u32, u32, bool), (usize, u64)> = BTreeMap::new();
 
         let mut addr: usize = 0;
 
@@ -83,18 +82,14 @@ impl ProcessMemory {
                 .any(|p| protect & 0xFF == p.0);
 
             let selected = info.State == MEM_COMMIT
-                && (info.Type == MEM_PRIVATE
-                    || info.Type == MEM_MAPPED
-                    || info.Type == MEM_IMAGE)
+                && (info.Type == MEM_PRIVATE || info.Type == MEM_MAPPED || info.Type == MEM_IMAGE)
                 && readable;
 
-            let key = (
-                info.State.0,
-                info.Type.0,
-                protect & 0xFF,
-                flags,
-                selected,
-            );
+            if selected {
+                out.push((base as u64, base.saturating_add(info.RegionSize) as u64));
+            }
+
+            let key = (info.State.0, info.Type.0, protect & 0xFF, flags, selected);
 
             let entry = counts.entry(key).or_insert((0, 0));
             entry.0 += 1;
@@ -107,7 +102,7 @@ impl ProcessMemory {
             addr = next;
         }
 
-        counts
+        let diagnostic = counts
             .iter()
             .map(|((state, kind, protect, flags, selected), (regions, bytes))| {
                 format!(
@@ -122,7 +117,9 @@ impl ProcessMemory {
                 )
             })
             .collect::<Vec<_>>()
-            .join("; ")
+            .join("; ");
+
+        (out, diagnostic)
     }
 
     pub fn rss(&self) -> u64 {
@@ -144,53 +141,15 @@ impl ProcessMemory {
 
 impl Memory for ProcessMemory {
     fn region_diagnostic(&self) -> String {
-        ProcessMemory::region_diagnostic(self)
+        self.enumerate_regions().1
+    }
+
+    fn regions_with_diagnostic(&self) -> (Vec<(u64, u64)>, String) {
+        self.enumerate_regions()
     }
 
     fn regions(&self) -> Vec<(u64, u64)> {
-        let mut out = Vec::new();
-        let mut addr: usize = 0;
-        loop {
-            let mut info = MEMORY_BASIC_INFORMATION::default();
-            let n = unsafe {
-                VirtualQueryEx(
-                    self.handle,
-                    Some(addr as *const c_void),
-                    &mut info,
-                    std::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
-                )
-            };
-            if n == 0 {
-                break;
-            }
-            let base = info.BaseAddress as usize;
-            let protect = info.Protect.0;
-            let readable = protect & PAGE_GUARD.0 == 0
-                && protect & PAGE_NOACCESS.0 == 0
-                && [
-                    PAGE_READONLY,
-                    PAGE_READWRITE,
-                    PAGE_WRITECOPY,
-                    PAGE_EXECUTE_READ,
-                    PAGE_EXECUTE_READWRITE,
-                    PAGE_EXECUTE_WRITECOPY,
-                ]
-                .iter()
-                .any(|p| protect & 0xFF == p.0);
-
-            if info.State == MEM_COMMIT
-                && (info.Type == MEM_PRIVATE || info.Type == MEM_MAPPED || info.Type == MEM_IMAGE)
-                && readable
-            {
-                out.push((base as u64, (base + info.RegionSize) as u64));
-            }
-            let next = base.saturating_add(info.RegionSize);
-            if next <= addr {
-                break;
-            }
-            addr = next;
-        }
-        out
+        self.enumerate_regions().0
     }
 
     fn read(&self, addr: u64, len: usize) -> Option<Vec<u8>> {

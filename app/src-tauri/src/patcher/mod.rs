@@ -53,6 +53,13 @@ pub trait Memory {
     fn region_diagnostic(&self) -> String {
         "region breakdown unavailable".to_string()
     }
+
+    /// Return scanner regions and their diagnostic breakdown from one snapshot.
+    fn regions_with_diagnostic(&self) -> (Vec<(u64, u64)>, String) {
+        let regions = self.regions();
+        let diagnostic = self.region_diagnostic();
+        (regions, diagnostic)
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -124,7 +131,7 @@ impl Patcher {
     }
 
     fn diagnostic_summary(&self, mem: &dyn Memory) -> String {
-        let regions = mem.regions();
+        let (regions, memory_map) = mem.regions_with_diagnostic();
         let total_bytes: u64 = regions.iter().map(|(lo, hi)| hi.saturating_sub(*lo)).sum();
         let mut hits = [0usize; COUNT];
         let mut aligned = [0usize; COUNT];
@@ -178,7 +185,15 @@ impl Patcher {
         }
 
         let counts: Vec<String> = (0..COUNT)
-            .map(|i| format!("{}:hits={},aligned={},valid={}", i + 1, hits[i], aligned[i], valid[i]))
+            .map(|i| {
+                format!(
+                    "{}:hits={},aligned={},valid={}",
+                    i + 1,
+                    hits[i],
+                    aligned[i],
+                    valid[i]
+                )
+            })
             .collect();
 
         format!(
@@ -189,7 +204,7 @@ impl Patcher {
             bytes_read / 1024 / 1024,
             self.group,
             counts.join("; "),
-            mem.region_diagnostic()
+            memory_map
         )
     }
 
