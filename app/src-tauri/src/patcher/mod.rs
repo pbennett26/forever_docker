@@ -132,80 +132,131 @@ impl Patcher {
 
     fn diagnostic_summary(&self, mem: &dyn Memory) -> String {
         let (regions, memory_map) = mem.regions_with_diagnostic();
-        let total_bytes: u64 = regions.iter().map(|(lo, hi)| hi.saturating_sub(*lo)).sum();
-        let mut hits = [0usize; COUNT];
-        let mut aligned = [0usize; COUNT];
-        let mut valid = [0usize; COUNT];
+        let total_bytes: u64 = regions.iter()
+            .map(|(lo, hi)| hi.saturating_sub(*lo))
+            .sum();
+
+        let anchor = [1u8, 0, 0, 0];
+        let finder = memmem::Finder::new(&anchor);
+        let mut candidates: Vec<u64> = Vec::new();
         let mut bytes_read = 0u64;
 
         for (lo, hi) in &regions {
             let mut off = *lo;
+
             while off < *hi {
                 let take = CHUNK.min((*hi - off) as usize);
                 let Some(buf) = mem.read(off, take) else {
                     break;
                 };
+
                 if buf.is_empty() {
                     break;
                 }
+
                 bytes_read += buf.len() as u64;
 
-                for (key_index, key) in self.keys.iter().enumerate() {
-                    let finder = memmem::Finder::new(key);
-                    for i in finder.find_iter(&buf) {
-                        hits[key_index] += 1;
-                        let entry_offset = (key_index * ENTRY + 4) as u64;
-                        let hit = off + i as u64;
-                        if hit >= entry_offset {
-                            let array = hit - entry_offset;
-                            if array % 4 == 0 {
-                                aligned[key_index] += 1;
-                                if self.state(mem, array) != State::Invalid {
-                                    valid[key_index] += 1;
-                                }
-                            }
+                for i in finder.find_iter(&buf) {
+                    let address = off + i as u64;
+
+                    // The first entry must be naturally aligned.
+                    if address % 4 != 0
+                        || address.saturating_add(BLOCK as u64) > *hi
+                    {
+                        continue;
+                    }
+
+                    let Some(raw) = mem.read(address, BLOCK) else {
+                        continue;
+                    };
+
+                    if raw.len() != BLOCK {
+                        continue;
+                    }
+
+                    // Validate the table structure without assuming
+                    // that any of its public keys match older builds.
+                    let mut valid = true;
+
+                    for e in 0..COUNT {
+                        let o = e * ENTRY;
+
+                        let id = u32::from_le_bytes(
+                            raw[o..o + 4].try_into().unwrap()
+                        );
+
+                        if id != e as u32 + 1
+                            || raw[o + 36] != EXPECTED_FLAGS[e]
+                            || raw[o + 38..o + 40] != [0, 0]
+                        {
+                            valid = false;
+                            break;
                         }
+                    }
+
+                    if valid {
+                        candidates.push(address);
                     }
                 }
 
-                if buf.len() < take {
-                    // Continue after a partial read while preserving overlap.
-                    let advance = buf.len().saturating_sub(31);
-                    if advance == 0 {
-                        break;
-                    }
-                    off += advance as u64;
-                    continue;
-                }
-                if take < CHUNK {
+                // Retain enough overlap to find a complete 480-byte
+                // candidate spanning adjacent read chunks.
+                let advance = buf.len().saturating_sub(BLOCK - 1);
+                if advance == 0 {
                     break;
                 }
-                off += (buf.len() - 31) as u64;
+
+                off += advance as u64;
+
+                if buf.len() < take || take < CHUNK {
+                    break;
+                }
             }
         }
 
-        let counts: Vec<String> = (0..COUNT)
-            .map(|i| {
-                format!(
-                    "{}:hits={},aligned={},valid={}",
-                    i + 1,
-                    hits[i],
-                    aligned[i],
-                    valid[i]
-                )
-            })
-            .collect();
+        candidates.sort_unstable();
+        candidates.dedup();
 
-        format!(
-            "Scanner diagnostic: pid={}, regions={}, region_bytes={} MiB, read={} MiB, group={}, keys=[{}], memory_map=[{}]",
+        let mut report = format!(
+            "Structural key-store scan: pid={}, regions={}, region_bytes={} MiB, read={} MiB, candidates={}, group={}, memory_map=[{}]",
             mem.pid(),
             regions.len(),
             total_bytes / 1024 / 1024,
             bytes_read / 1024 / 1024,
+            candidates.len(),
             self.group,
-            counts.join("; "),
             memory_map
-        )
+        );
+
+        for (index, address) in candidates.iter().take(10).enumerate() {
+            if let Some(raw) = mem.read(*address, BLOCK) {
+                report.push_str(&format!(
+                    "\nCandidate {} at 0x{:X}:",
+                    index + 1,
+                    address
+                ));
+
+                for e in 0..COUNT {
+                    let o = e * ENTRY;
+                    let key: String = raw[o + 4..o + 36]
+                        .iter()
+                        .map(|b| format!("{:02X}", b))
+                        .collect();
+
+                    report.push_str(&format!(
+                        "\n  entry={} key={} flag={:02X} padding={:02X}{:02X}{:02X}",
+                        e + 1,
+                        key,
+                        raw[o + 36],
+                        raw[o + 37],
+                        raw[o + 38],
+                        raw[o + 39]
+                    ));
+                }
+            }
+        }
+
+        report
     }
 
     fn find_stores(&self, mem: &dyn Memory) -> Vec<(u64, State)> {
